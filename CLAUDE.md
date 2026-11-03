@@ -49,6 +49,15 @@ commands and configuration.
   `version` in `Chart.yaml` when the chart changes.
 - On kind with Docker Desktop, load images with `docker save --platform
   linux/amd64` + `kind load image-archive`; `kind load docker-image` fails.
+- Tracing (`crates/relay-node/src/telemetry.rs`) is on only when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set. A bundle's `trace_parent` field carries
+  the W3C traceparent between hops: continue the trace from it when a node
+  takes a bundle in or forwards it, then set it to the current span. Comparing
+  bundles across hops in tests: use `untraced()`, since hops change it.
+- Tests that check spans use the one global test subscriber
+  (`exported_spans()`) and filter by bundle id. A thread-local subscriber
+  misses spans when other tests run the same code in parallel.
+- relay-node shuts down on Ctrl-C or SIGTERM and flushes traces on the way out.
 - relay-node tests run real nodes in-process on `127.0.0.1:0`, with no quick
   retries, and call `forward_queued()` directly instead of waiting for the
   background loop.

@@ -73,6 +73,10 @@ spec:
             - name: COURIER_NATS_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.relayNode.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             tcpSocket:
               port: grpc

@@ -1,6 +1,7 @@
 mod metrics;
 mod retry;
 mod store;
+mod telemetry;
 
 use anyhow::Context;
 use clap::Parser;
@@ -28,8 +29,7 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Endpoint, Server};
 use tonic::{Code, Request, Response, Status};
 use tower::ServiceExt;
-use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing::{field, info, info_span, warn, Instrument};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -290,7 +290,7 @@ impl Node {
 
         let mut done = HashSet::new();
         let mut unreachable = HashSet::new();
-        for bundle in pending {
+        for mut bundle in pending {
             let Some(hop) = self.router.next_hop(bundle.destination.node()) else {
                 continue;
             };
@@ -298,16 +298,37 @@ impl Node {
                 continue;
             }
             let bundle_id = bundle.id();
-            match self.router.forward(hop, &bundle).await {
+            let span = info_span!(
+                "forward_bundle",
+                %bundle_id,
+                next_hop = hop,
+                outcome = field::Empty,
+                otel.status_code = field::Empty,
+            );
+            telemetry::continue_trace(&span, bundle.trace_parent.as_deref());
+            let outcome = async {
+                // The next hop's span becomes a child of this one.
+                bundle.trace_parent =
+                    telemetry::current_trace_parent().or(bundle.trace_parent.take());
+                self.router.forward(hop, &bundle).await
+            }
+            .instrument(span.clone())
+            .await;
+            match outcome {
                 Forward::Sent => {
+                    span.record("outcome", "sent");
                     info!(%bundle_id, next_hop = hop, "forwarded");
                     self.metrics.forwarded.inc();
                 }
                 Forward::Rejected(error) => {
+                    span.record("outcome", "rejected");
+                    span.record("otel.status_code", "ERROR");
                     self.metrics.rejected.inc();
                     warn!(%bundle_id, next_hop = hop, %error, "rejected; dropping");
                 }
                 Forward::LinkDown => {
+                    span.record("outcome", "link down");
+                    span.record("otel.status_code", "ERROR");
                     unreachable.insert(hop);
                     continue;
                 }
@@ -346,14 +367,21 @@ impl RelayService for Node {
         let req = request.into_inner();
         let source = EndpointId::new(req.source).map_err(invalid)?;
         let destination = EndpointId::new(req.destination).map_err(invalid)?;
-        let bundle = Bundle::new(
+        let mut bundle = Bundle::new(
             source,
             destination,
             Duration::from_millis(req.lifetime_ms),
             req.payload,
         );
         let bundle_id = bundle.id();
-        self.accept(bundle).await.map_err(store_failed)?;
+        let span = info_span!("send_bundle", %bundle_id, destination = %bundle.destination);
+        async {
+            bundle.trace_parent = telemetry::current_trace_parent();
+            self.accept(bundle).await
+        }
+        .instrument(span)
+        .await
+        .map_err(store_failed)?;
         Ok(Response::new(SendBundleResponse { bundle_id }))
     }
 
@@ -394,13 +422,21 @@ impl RelayService for Node {
         &self,
         request: Request<ForwardBundleRequest>,
     ) -> Result<Response<ForwardBundleResponse>, Status> {
-        let bundle = Bundle::from_cbor(&request.into_inner().bundle).map_err(invalid)?;
-        if bundle.is_expired() {
-            info!(bundle_id = %bundle.id(), "received expired; dropping");
-            self.metrics.expired.inc();
-        } else {
-            self.accept(bundle).await.map_err(store_failed)?;
+        let mut bundle = Bundle::from_cbor(&request.into_inner().bundle).map_err(invalid)?;
+        let span = info_span!("receive_bundle", bundle_id = %bundle.id(), node = %self.id);
+        telemetry::continue_trace(&span, bundle.trace_parent.as_deref());
+        async {
+            if bundle.is_expired() {
+                info!(bundle_id = %bundle.id(), "received expired; dropping");
+                self.metrics.expired.inc();
+                return Ok(());
+            }
+            bundle.trace_parent = telemetry::current_trace_parent().or(bundle.trace_parent.take());
+            self.accept(bundle).await
         }
+        .instrument(span)
+        .await
+        .map_err(store_failed)?;
         Ok(Response::new(ForwardBundleResponse {}))
     }
 }
@@ -463,13 +499,26 @@ async fn serve_metrics(listener: tokio::net::TcpListener, node: Arc<Node>) {
     }
 }
 
+/// Ctrl-C, or SIGTERM from Docker and Kubernetes.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate()).expect("failed to listen for SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+    info!("shutting down");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-
     let args = Args::parse();
+    let tracer = telemetry::init(&args.node_id)?;
     let store = match &args.store_dir {
         Some(dir) => Some(
             Store::open(dir).with_context(|| format!("failed to open store {}", dir.display()))?,
@@ -501,8 +550,14 @@ async fn main() -> anyhow::Result<()> {
     info!(node_id = %args.node_id, listen = %args.listen, metrics = %args.metrics_listen, "relay node starting");
     Server::builder()
         .add_service(RelayServiceServer::from_arc(node))
-        .serve(args.listen)
+        .serve_with_shutdown(args.listen, shutdown_signal())
         .await?;
+    // Send any spans still buffered.
+    if let Some(tracer) = tracer {
+        if let Err(e) = tracer.shutdown() {
+            warn!(error = %e, "failed to flush traces");
+        }
+    }
     Ok(())
 }
 
@@ -523,6 +578,14 @@ mod tests {
             lifetime,
             b"hello".to_vec(),
         )
+    }
+
+    /// Each hop updates `trace_parent`; everything else must arrive unchanged.
+    fn untraced(bundle: &Bundle) -> Bundle {
+        Bundle {
+            trace_parent: None,
+            ..bundle.clone()
+        }
     }
 
     async fn listener() -> (TcpListener, String) {
@@ -600,7 +663,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(received, bundle);
+        assert_eq!(untraced(&received), untraced(&bundle));
         assert!(a.queue.lock().await.is_empty());
         assert!(b.queue.lock().await.is_empty());
         assert_eq!(a.metrics.forwarded.get(), 1);
@@ -709,7 +772,7 @@ mod tests {
             .await
             .expect("bundle not delivered after the link came back")
             .unwrap();
-        assert_eq!(received, bundle);
+        assert_eq!(untraced(&received), untraced(&bundle));
         // c can deliver before b's forward call returns and b dequeues it.
         eventually("b to dequeue", async || b.queue.lock().await.is_empty()).await;
         store.purge(format!("{id_b}--{id_c}")).await.unwrap();
@@ -737,6 +800,113 @@ mod tests {
                 text.contains(line),
                 "missing {line:?} in:
 {text}"
+            );
+        }
+    }
+
+    /// Spans from the whole test binary. The subscriber is global because a
+    /// thread-local one misses span sites that other tests are using on
+    /// other threads at the same time; tests pick out their own trace.
+    fn exported_spans() -> &'static opentelemetry_sdk::trace::InMemorySpanExporter {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use std::sync::OnceLock;
+        use tracing_subscriber::filter::Targets;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+
+        static TRACING: OnceLock<(SdkTracerProvider, InMemorySpanExporter)> = OnceLock::new();
+        let (_, exporter) = TRACING.get_or_init(|| {
+            let exporter = InMemorySpanExporter::default();
+            let provider = SdkTracerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build();
+            let layer = tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("test"))
+                .with_filter(Targets::new().with_target("relay_node", tracing::Level::INFO));
+            tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+                .expect("no other global subscriber in tests");
+            (provider, exporter)
+        });
+        exporter
+    }
+
+    #[tokio::test]
+    async fn one_trace_follows_a_bundle_across_hops() {
+        use opentelemetry_sdk::trace::SpanData;
+        let exporter = exported_spans();
+
+        let (listen_b, addr_b) = listener().await;
+        let (listen_c, addr_c) = listener().await;
+        let a = node(
+            "node-a",
+            vec![pair("node-b", &addr_b)],
+            vec![pair("node-c", "node-b")],
+        );
+        let b = node("node-b", vec![pair("node-c", &addr_c)], vec![]);
+        let c = node("node-c", vec![], vec![]);
+        serve(listen_b, &b);
+        serve(listen_c, &c);
+        let mut inbox = c.delivered.subscribe();
+
+        let bundle_id = a
+            .send_bundle(Request::new(SendBundleRequest {
+                source: "dtn://test/cli".into(),
+                destination: "dtn://node-c/inbox".into(),
+                lifetime_ms: 60_000,
+                payload: b"traced".to_vec(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .bundle_id;
+        a.forward_queued().await;
+        b.forward_queued().await;
+        tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ours = |s: &SpanData| {
+            s.attributes
+                .iter()
+                .any(|kv| kv.key.as_str() == "bundle_id" && kv.value.as_str() == bundle_id)
+        };
+        let spans: Vec<_> = exporter
+            .get_finished_spans()
+            .unwrap()
+            .into_iter()
+            .filter(ours)
+            .collect();
+        let find = |name: &str, key: &str, value: &str| -> SpanData {
+            spans
+                .iter()
+                .find(|s| {
+                    s.name == name
+                        && s.attributes
+                            .iter()
+                            .any(|kv| kv.key.as_str() == key && kv.value.as_str() == value)
+                })
+                .unwrap_or_else(|| panic!("no {name} span with {key}={value}"))
+                .clone()
+        };
+        let send = find("send_bundle", "destination", "dtn://node-c/inbox");
+        let chain = [
+            send.clone(),
+            find("forward_bundle", "next_hop", "node-b"),
+            find("receive_bundle", "node", "node-b"),
+            find("forward_bundle", "next_hop", "node-c"),
+            find("receive_bundle", "node", "node-c"),
+        ];
+        for pair in chain.windows(2) {
+            let (parent, child) = (&pair[0], &pair[1]);
+            assert_eq!(child.span_context.trace_id(), send.span_context.trace_id());
+            assert_eq!(
+                child.parent_span_id,
+                parent.span_context.span_id(),
+                "{} should be the parent of {}",
+                parent.name,
+                child.name
             );
         }
     }

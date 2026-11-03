@@ -109,7 +109,7 @@ docker compose --profile stack up -d --build
 ```
 
 This runs NATS, link-control, three relay nodes in a line
-(`node-a -- node-b -- node-c`), Prometheus and Grafana. The first build
+(`node-a -- node-b -- node-c`), Prometheus, Grafana and Jaeger. The first build
 compiles the workspace inside Docker and takes a few minutes; later builds
 reuse the cache.
 
@@ -119,6 +119,7 @@ reuse the cache.
 | link-control | `localhost:8080` |
 | Prometheus | <http://localhost:9090> |
 | Grafana, Courier dashboard | <http://localhost:3000> (anonymous viewer; `admin`/`admin` to edit) |
+| Jaeger, traces | <http://localhost:16686> (service `relay-node`) |
 
 Send a bundle from node-a to node-c, cut the `node-b--node-c` link and watch
 node-b's queue in Grafana:
@@ -179,6 +180,27 @@ Settings such as `relayNode.replicas`, `relayNode.storage` and
 `prometheus.io/scrape` annotations for a cluster Prometheus. Remove everything
 with `kind delete cluster --name courier`.
 
+## Tracing
+
+Set the standard `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `http://localhost:4318`)
+and each relay node sends OpenTelemetry traces over OTLP/HTTP. A bundle carries
+the W3C `traceparent` of the span that last handled it, so one trace follows a
+bundle across every hop:
+
+```
+send_bundle (node-a)
+└─ forward_bundle → node-b
+   └─ receive_bundle (node-b)
+      └─ forward_bundle → node-c     ← starts late if the link was down
+         └─ receive_bundle (node-c)
+```
+
+The gap before a `forward_bundle` span is the time the bundle waited for a
+link. Failed attempts show up as `forward_bundle` spans with
+`outcome=link down`. Spans have `service.name=relay-node` and
+`service.instance.id=<node id>`. In the Helm chart set
+`relayNode.otlpEndpoint`. Without an endpoint, nodes only log.
+
 ## Metrics
 
 Each relay node serves Prometheus metrics at `http://<node>:9464/metrics`. Every
@@ -219,6 +241,7 @@ series has a `node` label:
 | `COURIER_FORWARD_INTERVAL_MS` | relay-node | `1000` |
 | `COURIER_FORWARD_RETRIES` | relay-node | `2` |
 | `COURIER_METRICS_LISTEN` | relay-node | `0.0.0.0:9464` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | relay-node | none (no traces); standard `OTEL_*` exporter variables also apply |
 | `COURIER_LINK_LISTEN` | link-control | `0.0.0.0:8080` |
 | `COURIER_NATS_URL` | relay-node, link-control | none (link state not shared) |
 | `COURIER_TEST_NATS_URL` | NATS tests | `nats://127.0.0.1:4222` |

@@ -61,6 +61,11 @@ pub struct Bundle {
     pub lifetime_ms: u64,
     #[serde(with = "serde_bytes")]
     pub payload: Vec<u8>,
+    /// W3C `traceparent` of the span that last handled the bundle, so a trace
+    /// can follow it across hops. Not part of BPv7; omitted when empty, and
+    /// bundles encoded without it still decode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_parent: Option<String>,
 }
 
 impl Bundle {
@@ -77,6 +82,7 @@ impl Bundle {
             sequence: SEQUENCE.fetch_add(1, Ordering::Relaxed),
             lifetime_ms: u64::try_from(lifetime.as_millis()).unwrap_or(u64::MAX),
             payload,
+            trace_parent: None,
         }
     }
 
@@ -160,6 +166,33 @@ mod tests {
     }
 
     #[test]
+    fn decodes_bundles_encoded_without_a_trace_parent() {
+        #[derive(Serialize)]
+        struct OldBundle<'a> {
+            source: &'a str,
+            destination: &'a str,
+            created_at_ms: u64,
+            sequence: u64,
+            lifetime_ms: u64,
+            #[serde(with = "serde_bytes")]
+            payload: &'a [u8],
+        }
+        let mut old = Vec::new();
+        let fields = OldBundle {
+            source: "dtn://a/x",
+            destination: "dtn://b/y",
+            created_at_ms: 1,
+            sequence: 2,
+            lifetime_ms: 3,
+            payload: b"hi",
+        };
+        ciborium::into_writer(&fields, &mut old).unwrap();
+        let bundle = Bundle::from_cbor(&old).unwrap();
+        assert_eq!(bundle.trace_parent, None);
+        assert_eq!(bundle.payload, b"hi");
+    }
+
+    #[test]
     fn decode_rejects_garbage() {
         assert!(Bundle::from_cbor(&[0xff, 0x00, 0x13]).is_err());
     }
@@ -171,6 +204,7 @@ mod tests {
             dst in "[a-z]{1,8}",
             lifetime_ms in any::<u64>(),
             payload in proptest::collection::vec(any::<u8>(), 0..512),
+            trace_parent in proptest::option::of("[0-9a-f-]{55}"),
         ) {
             let b = Bundle {
                 source: endpoint(&format!("dtn://{src}/svc")),
@@ -179,6 +213,7 @@ mod tests {
                 sequence: 2,
                 lifetime_ms,
                 payload,
+                trace_parent,
             };
             let decoded = Bundle::from_cbor(&b.to_cbor().unwrap()).unwrap();
             prop_assert_eq!(decoded, b);

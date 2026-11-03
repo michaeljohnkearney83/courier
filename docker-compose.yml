@@ -1,6 +1,6 @@
 # `docker compose up -d` starts NATS only, which is all the tests need.
 # `docker compose --profile stack up -d --build` adds link-control, three relay
-# nodes in a line (node-a -- node-b -- node-c), Prometheus and Grafana.
+# nodes in a line (node-a -- node-b -- node-c), Prometheus, Grafana and Jaeger.
 
 x-relay-node: &relay-node
   image: courier/relay-node:dev
@@ -14,6 +14,7 @@ x-relay-node: &relay-node
 x-relay-env: &relay-env
   COURIER_NATS_URL: nats://nats:4222
   COURIER_STORE_DIR: /var/lib/courier
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
 
 services:
   nats:
@@ -94,6 +95,12 @@ services:
       - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3000:3000"
+
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    profiles: [stack]
+    ports:
+      - "16686:16686"
 
 volumes:
   node-a:

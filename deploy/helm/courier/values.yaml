@@ -10,6 +10,9 @@ relayNode:
   storage: 1Gi
   forwardIntervalMs: 1000
   forwardRetries: 2
+  # OTLP/HTTP endpoint for traces, e.g. http://jaeger-collector.observability:4318.
+  # Empty turns tracing off.
+  otlpEndpoint: ""
   resources: {}
 
 linkControl:
