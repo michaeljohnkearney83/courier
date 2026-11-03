@@ -1,3 +1,4 @@
+mod retry;
 mod store;
 
 use anyhow::Context;
@@ -10,6 +11,7 @@ use courier_proto::v1::{
     ForwardBundleRequest, ForwardBundleResponse, NodeStatusRequest, NodeStatusResponse,
     SendBundleRequest, SendBundleResponse, StreamReceivedRequest, StreamReceivedResponse,
 };
+use retry::Forwarder;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -22,8 +24,9 @@ use tokio::sync::{broadcast, Mutex, Notify};
 use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use tonic::transport::{Channel, Endpoint, Server};
+use tonic::transport::{Endpoint, Server};
 use tonic::{Code, Request, Response, Status};
+use tower::ServiceExt;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -56,6 +59,11 @@ struct Args {
           value_parser = clap::value_parser!(u64).range(1..))]
     forward_interval_ms: u64,
 
+    /// Quick retries, with backoff from 100 ms, when a peer is briefly
+    /// unavailable, before counting its link as down until the next pass.
+    #[arg(long, env = "COURIER_FORWARD_RETRIES", default_value_t = 2)]
+    forward_retries: u32,
+
     /// NATS server holding link-control's link state, e.g. nats://127.0.0.1:4222.
     /// Without it, every link counts as switched on.
     #[arg(long, env = "COURIER_NATS_URL")]
@@ -73,7 +81,7 @@ fn parse_pair(s: &str) -> Result<(String, String), String> {
 
 /// Static routing table: which peer gets a bundle for each destination node.
 struct Router {
-    peers: HashMap<String, RelayServiceClient<Channel>>,
+    peers: HashMap<String, Forwarder>,
     routes: HashMap<String, String>,
     /// Peers that failed last time, so a link going down is logged once.
     down: std::sync::Mutex<HashSet<String>>,
@@ -82,7 +90,11 @@ struct Router {
 }
 
 impl Router {
-    fn new(peers: Vec<(String, String)>, routes: Vec<(String, String)>) -> anyhow::Result<Self> {
+    fn new(
+        peers: Vec<(String, String)>,
+        routes: Vec<(String, String)>,
+        retries: u32,
+    ) -> anyhow::Result<Self> {
         let peers = peers
             .into_iter()
             .map(|(node, addr)| {
@@ -92,7 +104,8 @@ impl Router {
                     .connect_timeout(CONNECT_TIMEOUT)
                     .timeout(REQUEST_TIMEOUT)
                     .connect_lazy();
-                Ok((node, RelayServiceClient::new(channel)))
+                let client = RelayServiceClient::new(channel);
+                Ok((node, retry::forwarder(client, retries)))
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
         for (node, hop) in &routes {
@@ -140,11 +153,8 @@ impl Router {
             Ok(bytes) => bytes,
             Err(e) => return Forward::Rejected(e.to_string()),
         };
-        let mut client = self.peers[hop].clone();
-        let outcome = match client
-            .forward_bundle(ForwardBundleRequest { bundle: bytes })
-            .await
-        {
+        let request = ForwardBundleRequest { bundle: bytes };
+        let outcome = match self.peers[hop].clone().oneshot(request).await {
             Ok(_) => Forward::Sent,
             // The peer is up but will never take this bundle, so retrying is pointless.
             Err(s) if s.code() == Code::InvalidArgument => Forward::Rejected(s.message().into()),
@@ -433,7 +443,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         None => None,
     };
-    let router = Router::new(args.peers, args.routes)?;
+    let router = Router::new(args.peers, args.routes, args.forward_retries)?;
     let node = Arc::new(Node::new(args.node_id.clone(), router, store));
     node.restore().await?;
     tokio::spawn(run_forwarder(
@@ -488,7 +498,8 @@ mod tests {
     fn node(id: &str, peers: Vec<(String, String)>, routes: Vec<(String, String)>) -> Arc<Node> {
         Arc::new(Node::new(
             id.to_string(),
-            Router::new(peers, routes).unwrap(),
+            // No quick retries, so tests with a down link stay fast.
+            Router::new(peers, routes, 0).unwrap(),
             None,
         ))
     }
@@ -498,19 +509,20 @@ mod tests {
         let router = Router::new(
             vec![pair("b", "http://b:1"), pair("c", "http://c:1")],
             vec![pair("d", "c"), pair("*", "b")],
+            0,
         )
         .unwrap();
         assert_eq!(router.next_hop("c"), Some("c"));
         assert_eq!(router.next_hop("d"), Some("c"));
         assert_eq!(router.next_hop("anything"), Some("b"));
 
-        let no_default = Router::new(vec![pair("b", "http://b:1")], vec![]).unwrap();
+        let no_default = Router::new(vec![pair("b", "http://b:1")], vec![], 0).unwrap();
         assert_eq!(no_default.next_hop("x"), None);
     }
 
     #[tokio::test]
     async fn rejects_route_through_unknown_peer() {
-        assert!(Router::new(vec![], vec![pair("c", "b")]).is_err());
+        assert!(Router::new(vec![], vec![pair("c", "b")], 0).is_err());
     }
 
     #[test]
@@ -596,7 +608,6 @@ mod tests {
     }
 
     async fn switch_link(link_control: &axum::Router, x: &str, y: &str, up: bool) {
-        use tower::ServiceExt;
         let request = axum::http::Request::put(format!("/links/{x}--{y}"))
             .header("content-type", "application/json")
             .body(axum::body::Body::from(format!(r#"{{"up":{up}}}"#)))

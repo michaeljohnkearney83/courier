@@ -27,8 +27,12 @@ commands and configuration.
 - Tests that need NATS are `#[ignore]`d with a reason. Run them with
   `docker compose up -d` and `cargo test --workspace -- --include-ignored`; CI
   does this. Use fresh node ids per run and purge the keys you create.
-- relay-node tests run real nodes in-process on `127.0.0.1:0` and call
-  `forward_queued()` directly instead of waiting for the background loop.
+- Each peer's `ForwardBundle` call is a tower service with a retry layer
+  (`crates/relay-node/src/retry.rs`). Only `UNAVAILABLE` is retried; other
+  errors are final for that pass.
+- relay-node tests run real nodes in-process on `127.0.0.1:0`, with no quick
+  retries, and call `forward_queued()` directly instead of waiting for the
+  background loop.
 - Services read config from CLI flags with `COURIER_*` env fallbacks.
 - `fuzz/` is its own workspace and needs nightly.
 - `courier-proto` allows `clippy::result_large_err` for the generated code.

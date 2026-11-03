@@ -35,7 +35,7 @@ prost = "0.13"
 tonic-build = "0.12"
 protox = "0.7"
 axum = "0.7"
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5.2", features = ["util", "retry"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

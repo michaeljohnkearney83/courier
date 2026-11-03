@@ -75,7 +75,9 @@ Routing is static:
 - otherwise it goes through the peer named by `--route <node>=<peer>`;
 - `--route '*=<peer>'` sets a default route.
 
-Unreachable peers are retried every `--forward-interval-ms`. Bundles with no
+A peer that is briefly unavailable gets `--forward-retries` quick retries
+(100 ms, then 200 ms, ...) before its link counts as down; after that it is
+retried every `--forward-interval-ms`. Bundles with no
 route stay queued until their lifetime runs out. Without `--store-dir`, the
 queue is kept in memory only.
 
@@ -122,6 +124,7 @@ only and relay nodes treat every link as on.
 | `COURIER_ROUTES` | relay-node (`--route`) | none; comma-separated `node=peer`, `*=peer` for default |
 | `COURIER_STORE_DIR` | relay-node | none (queue kept in memory) |
 | `COURIER_FORWARD_INTERVAL_MS` | relay-node | `1000` |
+| `COURIER_FORWARD_RETRIES` | relay-node | `2` |
 | `COURIER_LINK_LISTEN` | link-control | `0.0.0.0:8080` |
 | `COURIER_NATS_URL` | relay-node, link-control | none (link state not shared) |
 | `COURIER_TEST_NATS_URL` | NATS tests | `nats://127.0.0.1:4222` |
