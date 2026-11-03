@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+project_id = "my-courier-project"
+
+# Optional: adds a budget alert on the project. Find it with
+# `gcloud billing accounts list`.
+# billing_account = "XXXXXX-XXXXXX-XXXXXX"
+# budget_amount   = 10

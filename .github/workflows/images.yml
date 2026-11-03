@@ -1,0 +1,47 @@
+name: Images
+
+# Publish the service images to GitHub Container Registry on every push to
+# main, tagged `main` and with the commit sha:
+#   ghcr.io/<owner>/courier-relay-node, ghcr.io/<owner>/courier-link-control
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Both images in one job, so the second build reuses the first one's
+      # cargo cache mounts and only compiles its own crate.
+      - name: relay-node
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: BIN=relay-node
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/courier-relay-node:main
+            ghcr.io/${{ github.repository_owner }}/courier-relay-node:${{ github.sha }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+      - name: link-control
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: BIN=link-control
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/courier-link-control:main
+            ghcr.io/${{ github.repository_owner }}/courier-link-control:${{ github.sha }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}

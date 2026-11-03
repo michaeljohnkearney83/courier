@@ -1,0 +1,19 @@
+# Overrides for the GKE cluster in deploy/terraform:
+#   helm install courier deploy/helm/courier -f deploy/helm/courier/values-gke.yaml
+# Images come from GHCR, published by .github/workflows/images.yml.
+relayNode:
+  image: ghcr.io/michaeljohnkearney83/courier-relay-node:main
+  # `main` moves with every push, so always check for a newer image.
+  imagePullPolicy: Always
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+
+linkControl:
+  image: ghcr.io/michaeljohnkearney83/courier-link-control:main
+  imagePullPolicy: Always
+  resources:
+    requests:
+      cpu: 20m
+      memory: 16Mi

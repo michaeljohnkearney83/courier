@@ -17,7 +17,8 @@ store bundles and forward them when links come back up.
 | `fuzz/` | cargo-fuzz targets (nightly only) |
 | `deploy/compose` | Prometheus config and the provisioned Grafana dashboard for the Compose stack |
 | `deploy/helm/courier` | Helm chart: relay nodes as a StatefulSet, link-control and NATS |
-| `deploy/kustomize`, `deploy/terraform` | Placeholders for week 5 |
+| `deploy/terraform` | Minimal GKE cluster (one zonal cluster, one spot node); see its README |
+| `deploy/kustomize` | Placeholder for week 5 |
 | `dashboard/` | Placeholder for the React dashboard (week 6) |
 | `docs/` | mdBook tutorial |
 
@@ -179,6 +180,10 @@ Settings such as `relayNode.replicas`, `relayNode.storage` and
 [`deploy/helm/courier/values.yaml`](deploy/helm/courier/values.yaml). Pods have
 `prometheus.io/scrape` annotations for a cluster Prometheus. Remove everything
 with `kind delete cluster --name courier`.
+
+To run on Google Kubernetes Engine instead, see
+[`deploy/terraform/README.md`](deploy/terraform/README.md). It uses the images
+CI publishes to `ghcr.io` and `values-gke.yaml`.
 
 ## Tracing
 

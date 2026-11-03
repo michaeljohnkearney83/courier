@@ -58,6 +58,13 @@ commands and configuration.
   (`exported_spans()`) and filter by bundle id. A thread-local subscriber
   misses spans when other tests run the same code in parallel.
 - relay-node shuts down on Ctrl-C or SIGTERM and flushes traces on the way out.
+- `deploy/terraform` is a minimal zonal GKE cluster (cost-sensitive: one spot
+  node, pd-standard disks, system-only logging). Never `terraform apply` or
+  `destroy` without the user's go-ahead. `terraform.tfvars` is gitignored;
+  `.terraform.lock.hcl` is committed. Before `destroy`, delete the PVCs, or
+  their disks outlive the cluster.
+- `.github/workflows/images.yml` publishes `ghcr.io/<owner>/courier-relay-node`
+  and `courier-link-control` (tags `main` and the commit sha) on push to main.
 - relay-node tests run real nodes in-process on `127.0.0.1:0`, with no quick
   retries, and call `forward_queued()` directly instead of waiting for the
   background loop.
