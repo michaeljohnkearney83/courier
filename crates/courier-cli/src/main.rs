@@ -71,8 +71,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Status => {
             let s = client.node_status(NodeStatusRequest {}).await?.into_inner();
             println!(
-                "node {}: {} queued, {} delivered",
-                s.node_id, s.queued_bundles, s.delivered_bundles
+                "node {}: {} queued, {} delivered, {} forwarded, {} expired",
+                s.node_id,
+                s.queued_bundles,
+                s.delivered_bundles,
+                s.forwarded_bundles,
+                s.expired_bundles
             );
         }
     }

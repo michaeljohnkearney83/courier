@@ -13,6 +13,10 @@ service RelayService {
 
   // Report queue depth and counters for this node.
   rpc NodeStatus(NodeStatusRequest) returns (NodeStatusResponse);
+
+  // Hand a bundle to this node from a neighbouring relay node. The bundle
+  // keeps its original id, creation time and lifetime.
+  rpc ForwardBundle(ForwardBundleRequest) returns (ForwardBundleResponse);
 }
 
 message SendBundleRequest {
@@ -43,4 +47,13 @@ message NodeStatusResponse {
   string node_id = 1;
   uint64 queued_bundles = 2;
   uint64 delivered_bundles = 3;
+  uint64 forwarded_bundles = 4;
+  uint64 expired_bundles = 5;
 }
+
+message ForwardBundleRequest {
+  // The bundle encoded with the courier-bundle CBOR codec.
+  bytes bundle = 1;
+}
+
+message ForwardBundleResponse {}

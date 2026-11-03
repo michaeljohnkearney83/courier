@@ -51,7 +51,32 @@ cargo run -p courier-cli -- send --from dtn://me/cli --to dtn://node-a/inbox "he
 cargo run -p courier-cli -- status
 ```
 
-Bundles addressed to another node are queued; forwarding comes in week 2.
+### Two nodes: store and forward
+
+Start node-a with node-b as a peer, but leave node-b down for now:
+
+```bash
+cargo run -p relay-node -- --node-id node-a --listen 127.0.0.1:50051   --peer node-b=http://127.0.0.1:50052 --store-dir ./data/node-a
+cargo run -p courier-cli -- send --from dtn://me/cli --to dtn://node-b/inbox "hello b"
+cargo run -p courier-cli -- status   # 1 queued; node-a logs "link down"
+```
+
+Then start node-b. Within a second node-a forwards the bundle:
+
+```bash
+cargo run -p relay-node -- --node-id node-b --listen 127.0.0.1:50052
+cargo run -p courier-cli -- --node http://127.0.0.1:50052 status   # 1 delivered
+```
+
+Routing is static:
+
+- a bundle for `dtn://<node>/...` goes straight to `<node>` if it is a `--peer`;
+- otherwise it goes through the peer named by `--route <node>=<peer>`;
+- `--route '*=<peer>'` sets a default route.
+
+Unreachable peers are retried every `--forward-interval-ms`. Bundles with no
+route stay queued until their lifetime runs out. Without `--store-dir`, the
+queue is kept in memory only.
 
 ## Other tasks
 
@@ -72,6 +97,10 @@ Bundles addressed to another node are queued; forwarding comes in week 2.
 |---|---|---|
 | `COURIER_NODE_ID` | relay-node | `node-a` |
 | `COURIER_LISTEN` | relay-node | `0.0.0.0:50051` |
+| `COURIER_PEERS` | relay-node (`--peer`) | none; comma-separated `node=http://host:port` |
+| `COURIER_ROUTES` | relay-node (`--route`) | none; comma-separated `node=peer`, `*=peer` for default |
+| `COURIER_STORE_DIR` | relay-node | none (queue kept in memory) |
+| `COURIER_FORWARD_INTERVAL_MS` | relay-node | `1000` |
 | `COURIER_LINK_LISTEN` | link-control | `0.0.0.0:8080` |
 | `COURIER_NODE` | courier-cli | `http://127.0.0.1:50051` |
 | `RUST_LOG` | all services | `info` |

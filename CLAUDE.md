@@ -11,6 +11,14 @@ commands and configuration.
   compiles it with protox (no protoc). Keep it passing `buf lint` (STANDARD):
   each RPC has its own `<Rpc>Request` / `<Rpc>Response` message.
 - Endpoints are `dtn://<node>/<service>`; build them with `EndpointId::new`.
+- Nodes hand bundles to each other with the `ForwardBundle` RPC, which carries
+  the CBOR-encoded bundle, so id, creation time and lifetime survive each hop.
+  Never rebuild a forwarded bundle with `Bundle::new`.
+- relay-node routing is static (`--peer`, `--route`). A peer counts as down
+  when the RPC fails; an `INVALID_ARGUMENT` reply drops the bundle instead of
+  retrying it. Link-control takes over the up/down decision in week 3.
+- relay-node tests run real nodes in-process on `127.0.0.1:0` and call
+  `forward_queued()` directly instead of waiting for the background loop.
 - Services read config from CLI flags with `COURIER_*` env fallbacks.
 - `fuzz/` is its own workspace and needs nightly.
 - `courier-proto` allows `clippy::result_large_err` for the generated code.
