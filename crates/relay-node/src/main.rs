@@ -44,6 +44,7 @@ struct Args {
     listen: SocketAddr,
 
     /// A neighbouring node and its gRPC address, e.g. node-b=http://127.0.0.1:50052.
+    /// An entry for this node itself is ignored.
     #[arg(long = "peer", env = "COURIER_PEERS", value_delimiter = ',', value_parser = parse_pair)]
     peers: Vec<(String, String)>,
 
@@ -475,7 +476,13 @@ async fn main() -> anyhow::Result<()> {
         ),
         None => None,
     };
-    let router = Router::new(args.peers, args.routes, args.forward_retries)?;
+    // Skipping ourselves lets every node share one peer list, e.g. a Helm StatefulSet.
+    let peers = args
+        .peers
+        .into_iter()
+        .filter(|(node, _)| *node != args.node_id)
+        .collect();
+    let router = Router::new(peers, args.routes, args.forward_retries)?;
     let node = Arc::new(Node::new(args.node_id.clone(), router, store));
     node.restore().await?;
     tokio::spawn(run_forwarder(

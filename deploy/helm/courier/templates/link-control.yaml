@@ -1,0 +1,55 @@
+{{- if .Values.linkControl.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: link-control
+spec:
+  selector:
+    app: link-control
+  ports:
+    - name: http
+      port: {{ .Values.linkControl.port }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: link-control
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: link-control
+  template:
+    metadata:
+      labels:
+        app: link-control
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: link-control
+          image: {{ .Values.linkControl.image }}
+          imagePullPolicy: {{ .Values.linkControl.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.linkControl.port }}
+          env:
+            - name: COURIER_LINK_LISTEN
+              value: "0.0.0.0:{{ .Values.linkControl.port }}"
+            {{- with include "courier.natsUrl" . }}
+            - name: COURIER_NATS_URL
+              value: {{ . | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          securityContext:
+            {{- include "courier.containerSecurity" . | nindent 12 }}
+          {{- with .Values.linkControl.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

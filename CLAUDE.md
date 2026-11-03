@@ -42,6 +42,13 @@ commands and configuration.
   profile adds the services. Grafana's dashboard is provisioned from
   `deploy/compose/grafana/dashboards/courier.json`; node colours are fixed per
   node, and link state uses text labels as well as colour.
+- Helm chart (`deploy/helm/courier`): relay nodes are a StatefulSet whose pod
+  names are the node ids. Every pod gets the same full-mesh `COURIER_PEERS`
+  (relay-node skips its own entry). Pods run as uid 65532 with a read-only
+  root filesystem; only `/var/lib/courier` (the PVC) is writable. Bump
+  `version` in `Chart.yaml` when the chart changes.
+- On kind with Docker Desktop, load images with `docker save --platform
+  linux/amd64` + `kind load image-archive`; `kind load docker-image` fails.
 - relay-node tests run real nodes in-process on `127.0.0.1:0`, with no quick
   retries, and call `forward_queued()` directly instead of waiting for the
   background loop.

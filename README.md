@@ -16,7 +16,7 @@ store bundles and forward them when links come back up.
 | `proto/` | Protobuf API, linted with Buf |
 | `fuzz/` | cargo-fuzz targets (nightly only) |
 | `deploy/compose` | Prometheus config and the provisioned Grafana dashboard for the Compose stack |
-| `deploy/helm/courier` | Helm chart: relay nodes as a StatefulSet |
+| `deploy/helm/courier` | Helm chart: relay nodes as a StatefulSet, link-control and NATS |
 | `deploy/kustomize`, `deploy/terraform` | Placeholders for week 5 |
 | `dashboard/` | Placeholder for the React dashboard (week 6) |
 | `docs/` | mdBook tutorial |
@@ -132,6 +132,53 @@ curl -X PUT localhost:8080/links/node-b--node-c -H 'content-type: application/js
 `docker compose --profile stack down` stops everything; add `-v` to also
 delete the nodes' stored bundles.
 
+## Kubernetes with kind and Helm
+
+The chart runs the relay nodes as a StatefulSet (`relay-node-0`, `-1`, `-2`),
+each with its own volume for queued bundles, plus link-control and a NATS
+server. Every node peers with every other node; cut links with link-control to
+force bundles through a particular path.
+
+```bash
+kind create cluster --name courier
+docker compose --profile stack build
+for img in relay-node link-control; do
+  docker save --platform linux/amd64 -o $img.tar courier/$img:dev
+  kind load image-archive $img.tar --name courier
+done
+helm install courier deploy/helm/courier
+kubectl rollout status statefulset/relay-node
+```
+
+The images go in as single-platform archives because `kind load docker-image`
+fails against Docker Desktop's containerd image store ("content digest ...
+not found"). On Apple silicon use `--platform linux/arm64`. After rebuilding
+the images, load them again and run `kubectl rollout restart statefulset/relay-node deployment/link-control`.
+
+Talk to it through port-forwards, each in its own terminal:
+
+```bash
+kubectl port-forward pod/relay-node-0 50051:50051
+kubectl port-forward svc/link-control 8080:8080
+```
+
+Then cut the direct link from node 0 to node 2 and send a bundle. It waits on
+`relay-node-0`, survives that pod being deleted (it is stored on the pod's
+volume), and is forwarded once the link is back:
+
+```bash
+curl -X PUT localhost:8080/links/relay-node-0--relay-node-2 -H 'content-type: application/json' -d '{"up":false}'
+cargo run -p courier-cli -- send --from dtn://me/cli --to dtn://relay-node-2/inbox "hello"
+cargo run -p courier-cli -- status   # 1 queued
+curl -X PUT localhost:8080/links/relay-node-0--relay-node-2 -H 'content-type: application/json' -d '{"up":true}'
+```
+
+Settings such as `relayNode.replicas`, `relayNode.storage` and
+`nats.enabled` / `nats.externalUrl` are in
+[`deploy/helm/courier/values.yaml`](deploy/helm/courier/values.yaml). Pods have
+`prometheus.io/scrape` annotations for a cluster Prometheus. Remove everything
+with `kind delete cluster --name courier`.
+
 ## Metrics
 
 Each relay node serves Prometheus metrics at `http://<node>:9464/metrics`. Every
@@ -156,7 +203,7 @@ series has a `node` label:
 | NATS | `docker compose up -d` |
 | Tests that need NATS | `docker compose up -d` then `cargo test --workspace -- --include-ignored` |
 | Container image | `docker build --build-arg BIN=relay-node -t courier/relay-node:dev .` (or `BIN=link-control`) |
-| Helm | `helm install courier deploy/helm/courier` |
+| Helm lint | `helm lint deploy/helm/courier` |
 | Lint proto | `buf lint` |
 | Docs | `mdbook serve docs` |
 

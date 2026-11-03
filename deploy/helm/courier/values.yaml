@@ -1,5 +1,29 @@
 relayNode:
+  # Each pod is a node named after the pod (relay-node-0, relay-node-1, ...),
+  # and every node peers with every other one.
   replicas: 3
   image: courier/relay-node:dev
+  imagePullPolicy: IfNotPresent
   grpcPort: 50051
+  metricsPort: 9464
+  # Size of each node's volume for queued bundles.
   storage: 1Gi
+  forwardIntervalMs: 1000
+  forwardRetries: 2
+  resources: {}
+
+linkControl:
+  enabled: true
+  image: courier/link-control:dev
+  imagePullPolicy: IfNotPresent
+  port: 8080
+  resources: {}
+
+nats:
+  # Run a single NATS server with JetStream in the release. Its link state
+  # lives in memory and is lost if the pod restarts.
+  enabled: true
+  image: nats:2.10
+  # With nats.enabled false, point at an existing server instead,
+  # e.g. nats://nats.messaging:4222. Empty means link state is not shared.
+  externalUrl: ""

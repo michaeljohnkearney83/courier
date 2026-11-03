@@ -1,16 +1,23 @@
-# Each relay node is a StatefulSet pod (relay-node-0, relay-node-1, ...)
-# with its own volume for stored bundles. The pod name is the node id.
+# Each relay node is a StatefulSet pod (relay-node-0, relay-node-1, ...) with
+# its own volume for queued bundles. The pod name is the node id, and the
+# headless service gives each pod a stable DNS name for its peers.
 apiVersion: v1
 kind: Service
 metadata:
   name: relay-node
+  labels:
+    app: relay-node
 spec:
   clusterIP: None
+  # Peers need DNS names before a node is ready, or start-up would deadlock.
+  publishNotReadyAddresses: true
   selector:
     app: relay-node
   ports:
     - name: grpc
       port: {{ .Values.relayNode.grpcPort }}
+    - name: metrics
+      port: {{ .Values.relayNode.metricsPort }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -19,6 +26,8 @@ metadata:
 spec:
   serviceName: relay-node
   replicas: {{ .Values.relayNode.replicas }}
+  # Nodes don't depend on each other to start, so start them all at once.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: relay-node
@@ -26,13 +35,23 @@ spec:
     metadata:
       labels:
         app: relay-node
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.relayNode.metricsPort }}"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
       containers:
         - name: relay-node
           image: {{ .Values.relayNode.image }}
+          imagePullPolicy: {{ .Values.relayNode.imagePullPolicy }}
           ports:
             - name: grpc
               containerPort: {{ .Values.relayNode.grpcPort }}
+            - name: metrics
+              containerPort: {{ .Values.relayNode.metricsPort }}
           env:
             - name: COURIER_NODE_ID
               valueFrom:
@@ -40,6 +59,30 @@ spec:
                   fieldPath: metadata.name
             - name: COURIER_LISTEN
               value: "0.0.0.0:{{ .Values.relayNode.grpcPort }}"
+            - name: COURIER_METRICS_LISTEN
+              value: "0.0.0.0:{{ .Values.relayNode.metricsPort }}"
+            - name: COURIER_PEERS
+              value: {{ include "courier.peers" . | quote }}
+            - name: COURIER_STORE_DIR
+              value: /var/lib/courier
+            - name: COURIER_FORWARD_INTERVAL_MS
+              value: "{{ .Values.relayNode.forwardIntervalMs }}"
+            - name: COURIER_FORWARD_RETRIES
+              value: "{{ .Values.relayNode.forwardRetries }}"
+            {{- with include "courier.natsUrl" . }}
+            - name: COURIER_NATS_URL
+              value: {{ . | quote }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 5
+          securityContext:
+            {{- include "courier.containerSecurity" . | nindent 12 }}
+          {{- with .Values.relayNode.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: bundles
               mountPath: /var/lib/courier
