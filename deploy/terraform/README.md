@@ -20,11 +20,18 @@ There's no load balancer; reach the services with `kubectl port-forward`.
 
 1. Start the free trial at <https://cloud.google.com/free>, create a project,
    and note its project id.
-2. Make the images public: on GitHub, open each package
-   (`courier-relay-node`, `courier-link-control`) under your profile's
-   **Packages**, then **Package settings → Change visibility → Public**.
-   They're published by `.github/workflows/images.yml` on every push to `main`.
-3. Sign in and install the kubectl auth plugin:
+2. Check the images are public. They're published by
+   `.github/workflows/images.yml` on every push to `main`, and normally inherit
+   the repository's public visibility. If GKE reports `ImagePullBackOff` with
+   an authorization error, open each package (`courier-relay-node`,
+   `courier-link-control`) under your GitHub profile's **Packages**, then
+   **Package settings → Change visibility → Public**.
+3. Sign in and install the kubectl auth plugin. Use a **normal, not
+   Administrator**, PowerShell: files `gcloud` creates from an elevated shell
+   are owned by Administrators, and kubectl then fails with "Permission denied"
+   on `legacy_credentials\<account>\adc.json`. If that happened, fix it from an
+   Administrator shell with `takeown /F "$env:APPDATA\gcloud" /R /D Y` and
+   `icacls "$env:APPDATA\gcloud" /reset /T /C`.
 
    ```bash
    gcloud auth login
@@ -45,7 +52,9 @@ There's no load balancer; reach the services with `kubectl port-forward`.
 ```bash
 terraform init
 terraform plan      # read what it will create
-terraform apply     # about 5–10 minutes
+# The budget looks up the project number, which needs the APIs enabled first:
+terraform apply -target=google_project_service.apis
+terraform apply     # budget, cluster and node pool: about 7 minutes
 $(terraform output -raw get_credentials)
 ```
 
@@ -71,4 +80,8 @@ kubectl delete pvc --all          # deletes the nodes' disks
 terraform destroy
 ```
 
+This also removes the budget alert. The APIs stay enabled (they're free).
 Afterwards, `gcloud compute disks list` should show no `pvc-...` disks.
+
+Spot nodes can be reclaimed and replaced at any time; the relay nodes'
+queues survive that because they live on the PVC disks.

@@ -7,6 +7,7 @@ resource "google_project_service" "apis" {
     "compute.googleapis.com",
     "container.googleapis.com",
     "billingbudgets.googleapis.com",
+    "cloudresourcemanager.googleapis.com",
   ])
   service = each.value
   # Leave the APIs on after destroy; turning them off can break other things
@@ -60,7 +61,10 @@ resource "google_container_node_pool" "default" {
   }
 }
 
-data "google_project" "this" {}
+# Only needed for the budget, and needs the Cloud Resource Manager API.
+data "google_project" "this" {
+  count = var.billing_account == "" ? 0 : 1
+}
 
 resource "google_billing_budget" "courier" {
   count           = var.billing_account == "" ? 0 : 1
@@ -68,7 +72,7 @@ resource "google_billing_budget" "courier" {
   display_name    = "courier demo"
 
   budget_filter {
-    projects = ["projects/${data.google_project.this.number}"]
+    projects = ["projects/${data.google_project.this[0].number}"]
   }
 
   amount {
