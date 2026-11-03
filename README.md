@@ -15,6 +15,7 @@ store bundles and forward them when links come back up.
 | `crates/courier-cli` | `courier` command-line client |
 | `proto/` | Protobuf API, linted with Buf |
 | `fuzz/` | cargo-fuzz targets (nightly only) |
+| `deploy/compose` | Prometheus config and the provisioned Grafana dashboard for the Compose stack |
 | `deploy/helm/courier` | Helm chart: relay nodes as a StatefulSet |
 | `deploy/kustomize`, `deploy/terraform` | Placeholders for week 5 |
 | `dashboard/` | Placeholder for the React dashboard (week 6) |
@@ -101,6 +102,51 @@ Links are undirected: `node-b--node-a` is stored as `node-a--node-b`. A link
 with no entry is on. Without `--nats-url`, link-control keeps state in memory
 only and relay nodes treat every link as on.
 
+## Full stack in Docker
+
+```bash
+docker compose --profile stack up -d --build
+```
+
+This runs NATS, link-control, three relay nodes in a line
+(`node-a -- node-b -- node-c`), Prometheus and Grafana. The first build
+compiles the workspace inside Docker and takes a few minutes; later builds
+reuse the cache.
+
+| Service | Address |
+|---|---|
+| node-a, node-b, node-c (gRPC) | `localhost:50051`, `50052`, `50053` |
+| link-control | `localhost:8080` |
+| Prometheus | <http://localhost:9090> |
+| Grafana, Courier dashboard | <http://localhost:3000> (anonymous viewer; `admin`/`admin` to edit) |
+
+Send a bundle from node-a to node-c, cut the `node-b--node-c` link and watch
+node-b's queue in Grafana:
+
+```bash
+curl -X PUT localhost:8080/links/node-b--node-c -H 'content-type: application/json' -d '{"up":false}'
+cargo run -p courier-cli -- send --from dtn://me/cli --to dtn://node-c/inbox "hello c"
+curl -X PUT localhost:8080/links/node-b--node-c -H 'content-type: application/json' -d '{"up":true}'
+```
+
+`docker compose --profile stack down` stops everything; add `-v` to also
+delete the nodes' stored bundles.
+
+## Metrics
+
+Each relay node serves Prometheus metrics at `http://<node>:9464/metrics`. Every
+series has a `node` label:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `courier_queued_bundles` | gauge | Bundles waiting for a link |
+| `courier_bundles_delivered_total` | counter | Delivered to a local endpoint |
+| `courier_bundles_forwarded_total` | counter | Handed to a peer |
+| `courier_bundles_expired_total` | counter | Dropped when their lifetime ran out |
+| `courier_bundles_rejected_total` | counter | Dropped because a peer rejected them as invalid |
+| `courier_peer_reachable{peer}` | gauge | 1 unless the last forward to the peer failed |
+| `courier_link_switched_off{peer}` | gauge | 1 while link-control has the link switched off |
+
 ## Other tasks
 
 | Task | Command |
@@ -109,7 +155,7 @@ only and relay nodes treat every link as on.
 | Fuzz the decoder | `cargo +nightly fuzz run decode_bundle` (from `fuzz/`'s parent) |
 | NATS | `docker compose up -d` |
 | Tests that need NATS | `docker compose up -d` then `cargo test --workspace -- --include-ignored` |
-| Container image | `docker build --build-arg BIN=relay-node -t courier/relay-node:dev .` |
+| Container image | `docker build --build-arg BIN=relay-node -t courier/relay-node:dev .` (or `BIN=link-control`) |
 | Helm | `helm install courier deploy/helm/courier` |
 | Lint proto | `buf lint` |
 | Docs | `mdbook serve docs` |
@@ -125,6 +171,7 @@ only and relay nodes treat every link as on.
 | `COURIER_STORE_DIR` | relay-node | none (queue kept in memory) |
 | `COURIER_FORWARD_INTERVAL_MS` | relay-node | `1000` |
 | `COURIER_FORWARD_RETRIES` | relay-node | `2` |
+| `COURIER_METRICS_LISTEN` | relay-node | `0.0.0.0:9464` |
 | `COURIER_LINK_LISTEN` | link-control | `0.0.0.0:8080` |
 | `COURIER_NATS_URL` | relay-node, link-control | none (link state not shared) |
 | `COURIER_TEST_NATS_URL` | NATS tests | `nats://127.0.0.1:4222` |

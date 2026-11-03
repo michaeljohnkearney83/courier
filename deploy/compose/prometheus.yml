@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: relay-node
+    static_configs:
+      - targets: ["node-a:9464", "node-b:9464", "node-c:9464"]

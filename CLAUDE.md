@@ -30,6 +30,18 @@ commands and configuration.
 - Each peer's `ForwardBundle` call is a tower service with a retry layer
   (`crates/relay-node/src/retry.rs`). Only `UNAVAILABLE` is retried; other
   errors are final for that pass.
+- relay-node metrics live in `crates/relay-node/src/metrics.rs`
+  (prometheus-client, `courier_` prefix, `node` label on every series). The
+  counters are the source of truth for `NodeStatus` too; don't add parallel
+  atomics. The queue gauge is set when metrics are scraped.
+- The Dockerfile caches `target/` with BuildKit mounts. Keep the `touch` before
+  `cargo build` (COPY keeps old mtimes, so cargo would ship a stale binary) and
+  keep `rust-toolchain.toml` in `.dockerignore` (otherwise parallel image builds
+  race downloading clippy/rustfmt).
+- `docker-compose.yml`: plain `up` starts NATS only (for tests); the `stack`
+  profile adds the services. Grafana's dashboard is provisioned from
+  `deploy/compose/grafana/dashboards/courier.json`; node colours are fixed per
+  node, and link state uses text labels as well as colour.
 - relay-node tests run real nodes in-process on `127.0.0.1:0`, with no quick
   retries, and call `forward_queued()` directly instead of waiting for the
   background loop.

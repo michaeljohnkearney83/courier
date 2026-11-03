@@ -35,6 +35,7 @@ prost = "0.13"
 tonic-build = "0.12"
 protox = "0.7"
 axum = "0.7"
+prometheus-client = "0.25"
 tower = { version = "0.5.2", features = ["util", "retry"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

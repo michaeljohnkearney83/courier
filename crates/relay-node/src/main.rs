@@ -1,3 +1,4 @@
+mod metrics;
 mod retry;
 mod store;
 
@@ -11,12 +12,12 @@ use courier_proto::v1::{
     ForwardBundleRequest, ForwardBundleResponse, NodeStatusRequest, NodeStatusResponse,
     SendBundleRequest, SendBundleResponse, StreamReceivedRequest, StreamReceivedResponse,
 };
+use metrics::{LinkGauges, Metrics};
 use retry::Forwarder;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use store::Store;
@@ -64,6 +65,10 @@ struct Args {
     #[arg(long, env = "COURIER_FORWARD_RETRIES", default_value_t = 2)]
     forward_retries: u32,
 
+    /// Address for the Prometheus /metrics endpoint.
+    #[arg(long, env = "COURIER_METRICS_LISTEN", default_value = "0.0.0.0:9464")]
+    metrics_listen: SocketAddr,
+
     /// NATS server holding link-control's link state, e.g. nats://127.0.0.1:4222.
     /// Without it, every link counts as switched on.
     #[arg(long, env = "COURIER_NATS_URL")]
@@ -87,6 +92,7 @@ struct Router {
     down: std::sync::Mutex<HashSet<String>>,
     /// Peers whose link link-control has switched off.
     switched_off: std::sync::Mutex<HashSet<String>>,
+    gauges: LinkGauges,
 }
 
 impl Router {
@@ -108,6 +114,11 @@ impl Router {
                 Ok((node, retry::forwarder(client, retries)))
             })
             .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        let gauges = LinkGauges::default();
+        for peer in peers.keys() {
+            gauges.set_reachable(peer, true);
+            gauges.set_switched_off(peer, false);
+        }
         for (node, hop) in &routes {
             anyhow::ensure!(
                 peers.contains_key(hop),
@@ -119,6 +130,7 @@ impl Router {
             routes: routes.into_iter().collect(),
             down: Default::default(),
             switched_off: Default::default(),
+            gauges,
         })
     }
 
@@ -141,6 +153,7 @@ impl Router {
     /// Record link-control's state for the link to `peer`. Returns whether it changed.
     fn switch(&self, peer: &str, up: bool) -> bool {
         let mut off = self.switched_off.lock().unwrap();
+        self.gauges.set_switched_off(peer, !up);
         if up {
             off.remove(peer)
         } else {
@@ -161,6 +174,7 @@ impl Router {
             Err(_) => Forward::LinkDown,
         };
         let link_down = matches!(outcome, Forward::LinkDown);
+        self.gauges.set_reachable(hop, !link_down);
         let mut down = self.down.lock().unwrap();
         if link_down && down.insert(hop.to_string()) {
             warn!(peer = hop, "link down; holding bundles until it is back");
@@ -185,9 +199,7 @@ struct Node {
     queue: Mutex<VecDeque<Bundle>>,
     /// Wakes the forwarder when a bundle is queued or a link is switched on.
     wake: Notify,
-    delivered_count: AtomicU64,
-    forwarded_count: AtomicU64,
-    expired_count: AtomicU64,
+    metrics: Metrics,
     delivered: broadcast::Sender<Bundle>,
 }
 
@@ -195,14 +207,12 @@ impl Node {
     fn new(id: String, router: Router, store: Option<Store>) -> Self {
         let (delivered, _) = broadcast::channel(1024);
         Self {
+            metrics: Metrics::new(&id, &router.gauges),
             id,
             router,
             store,
             queue: Mutex::new(VecDeque::new()),
             wake: Notify::new(),
-            delivered_count: AtomicU64::new(0),
-            forwarded_count: AtomicU64::new(0),
-            expired_count: AtomicU64::new(0),
             delivered,
         }
     }
@@ -222,7 +232,7 @@ impl Node {
         let bundle_id = bundle.id();
         if bundle.destination.node() == self.id {
             info!(%bundle_id, "delivering locally");
-            self.delivered_count.fetch_add(1, Ordering::Relaxed);
+            self.metrics.delivered.inc();
             // No receivers is fine: nobody is listening on that endpoint yet.
             let _ = self.delivered.send(bundle);
             return Ok(());
@@ -273,7 +283,7 @@ impl Node {
 
         for bundle in &expired {
             info!(bundle_id = %bundle.id(), "expired; dropping");
-            self.expired_count.fetch_add(1, Ordering::Relaxed);
+            self.metrics.expired.inc();
             self.unstore(bundle).await;
         }
 
@@ -290,9 +300,10 @@ impl Node {
             match self.router.forward(hop, &bundle).await {
                 Forward::Sent => {
                     info!(%bundle_id, next_hop = hop, "forwarded");
-                    self.forwarded_count.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.forwarded.inc();
                 }
                 Forward::Rejected(error) => {
+                    self.metrics.rejected.inc();
                     warn!(%bundle_id, next_hop = hop, %error, "rejected; dropping");
                 }
                 Forward::LinkDown => {
@@ -307,6 +318,13 @@ impl Node {
         if !done.is_empty() {
             self.queue.lock().await.retain(|b| !done.contains(&b.id()));
         }
+    }
+
+    async fn render_metrics(&self) -> String {
+        self.metrics
+            .queued
+            .set(self.queue.lock().await.len() as i64);
+        self.metrics.encode()
     }
 
     async fn unstore(&self, bundle: &Bundle) {
@@ -365,9 +383,9 @@ impl RelayService for Node {
         Ok(Response::new(NodeStatusResponse {
             node_id: self.id.clone(),
             queued_bundles: self.queue.lock().await.len() as u64,
-            delivered_bundles: self.delivered_count.load(Ordering::Relaxed),
-            forwarded_bundles: self.forwarded_count.load(Ordering::Relaxed),
-            expired_bundles: self.expired_count.load(Ordering::Relaxed),
+            delivered_bundles: self.metrics.delivered.get(),
+            forwarded_bundles: self.metrics.forwarded.get(),
+            expired_bundles: self.metrics.expired.get(),
         }))
     }
 
@@ -378,7 +396,7 @@ impl RelayService for Node {
         let bundle = Bundle::from_cbor(&request.into_inner().bundle).map_err(invalid)?;
         if bundle.is_expired() {
             info!(bundle_id = %bundle.id(), "received expired; dropping");
-            self.expired_count.fetch_add(1, Ordering::Relaxed);
+            self.metrics.expired.inc();
         } else {
             self.accept(bundle).await.map_err(store_failed)?;
         }
@@ -430,6 +448,20 @@ async fn watch_links(node: &Node, nats_url: &str) -> Result<(), courier_links::N
     Ok(())
 }
 
+async fn serve_metrics(listener: tokio::net::TcpListener, node: Arc<Node>) {
+    use axum::http::header::CONTENT_TYPE;
+    let app = axum::Router::new().route(
+        "/metrics",
+        axum::routing::get(move || async move {
+            let content_type = "application/openmetrics-text; version=1.0.0; charset=utf-8";
+            ([(CONTENT_TYPE, content_type)], node.render_metrics().await)
+        }),
+    );
+    if let Err(e) = axum::serve(listener, app).await {
+        warn!(error = %e, "metrics server stopped");
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -454,7 +486,12 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(follow_links(node.clone(), url));
     }
 
-    info!(node_id = %args.node_id, listen = %args.listen, "relay node starting");
+    let metrics = tokio::net::TcpListener::bind(args.metrics_listen)
+        .await
+        .with_context(|| format!("failed to bind metrics on {}", args.metrics_listen))?;
+    tokio::spawn(serve_metrics(metrics, node.clone()));
+
+    info!(node_id = %args.node_id, listen = %args.listen, metrics = %args.metrics_listen, "relay node starting");
     Server::builder()
         .add_service(RelayServiceServer::from_arc(node))
         .serve(args.listen)
@@ -559,8 +596,8 @@ mod tests {
         assert_eq!(received, bundle);
         assert!(a.queue.lock().await.is_empty());
         assert!(b.queue.lock().await.is_empty());
-        assert_eq!(a.forwarded_count.load(Ordering::Relaxed), 1);
-        assert_eq!(b.forwarded_count.load(Ordering::Relaxed), 1);
+        assert_eq!(a.metrics.forwarded.get(), 1);
+        assert_eq!(b.metrics.forwarded.get(), 1);
     }
 
     #[tokio::test]
@@ -581,7 +618,7 @@ mod tests {
         serve(TcpListener::bind(bind_b).await.unwrap(), &b);
         a.forward_queued().await;
         assert!(a.queue.lock().await.is_empty());
-        assert_eq!(b.delivered_count.load(Ordering::Relaxed), 1);
+        assert_eq!(b.metrics.delivered.get(), 1);
     }
 
     #[tokio::test]
@@ -657,8 +694,8 @@ mod tests {
         })
         .await;
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(b.forwarded_count.load(Ordering::Relaxed), 0);
-        assert_eq!(c.delivered_count.load(Ordering::Relaxed), 0);
+        assert_eq!(b.metrics.forwarded.get(), 0);
+        assert_eq!(c.metrics.delivered.get(), 0);
 
         switch_link(&link_control, &id_b, &id_c, true).await;
         let received = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
@@ -672,6 +709,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_metrics_per_node_and_peer() {
+        let a = node("node-a", vec![pair("node-b", "http://b:1")], vec![]);
+        a.accept(bundle_to("dtn://node-a/inbox", Duration::from_secs(60)))
+            .await
+            .unwrap();
+        a.accept(bundle_to("dtn://node-b/inbox", Duration::from_secs(60)))
+            .await
+            .unwrap();
+        a.set_link(&"node-a--node-b".parse().unwrap(), false);
+
+        let text = a.render_metrics().await;
+        for line in [
+            r#"courier_bundles_delivered_total{node="node-a"} 1"#,
+            r#"courier_queued_bundles{node="node-a"} 1"#,
+            r#"courier_link_switched_off{node="node-a",peer="node-b"} 1"#,
+            r#"courier_peer_reachable{node="node-a",peer="node-b"} 1"#,
+        ] {
+            assert!(
+                text.contains(line),
+                "missing {line:?} in:
+{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn drops_expired_bundles() {
         let a = node("node-a", vec![], vec![]);
         a.accept(bundle_to("dtn://node-b/inbox", Duration::ZERO))
@@ -679,6 +742,6 @@ mod tests {
             .unwrap();
         a.forward_queued().await;
         assert!(a.queue.lock().await.is_empty());
-        assert_eq!(a.expired_count.load(Ordering::Relaxed), 1);
+        assert_eq!(a.metrics.expired.get(), 1);
     }
 }

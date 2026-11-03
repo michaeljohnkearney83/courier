@@ -1,4 +1,20 @@
-# Local dev dependencies. Start with: docker compose up -d
+# `docker compose up -d` starts NATS only, which is all the tests need.
+# `docker compose --profile stack up -d --build` adds link-control, three relay
+# nodes in a line (node-a -- node-b -- node-c), Prometheus and Grafana.
+
+x-relay-node: &relay-node
+  image: courier/relay-node:dev
+  build:
+    context: .
+    args:
+      BIN: relay-node
+  profiles: [stack]
+  depends_on: [nats]
+
+x-relay-env: &relay-env
+  COURIER_NATS_URL: nats://nats:4222
+  COURIER_STORE_DIR: /var/lib/courier
+
 services:
   nats:
     image: nats:2.10
@@ -6,3 +22,80 @@ services:
     ports:
       - "4222:4222"
       - "8222:8222"
+
+  link-control:
+    image: courier/link-control:dev
+    build:
+      context: .
+      args:
+        BIN: link-control
+    profiles: [stack]
+    depends_on: [nats]
+    environment:
+      COURIER_NATS_URL: nats://nats:4222
+    ports:
+      - "8080:8080"
+
+  node-a:
+    <<: *relay-node
+    environment:
+      <<: *relay-env
+      COURIER_NODE_ID: node-a
+      COURIER_PEERS: node-b=http://node-b:50051
+      COURIER_ROUTES: "*=node-b"
+    ports:
+      - "50051:50051"
+    volumes:
+      - node-a:/var/lib/courier
+
+  node-b:
+    <<: *relay-node
+    environment:
+      <<: *relay-env
+      COURIER_NODE_ID: node-b
+      COURIER_PEERS: node-a=http://node-a:50051,node-c=http://node-c:50051
+    ports:
+      - "50052:50051"
+    volumes:
+      - node-b:/var/lib/courier
+
+  node-c:
+    <<: *relay-node
+    environment:
+      <<: *relay-env
+      COURIER_NODE_ID: node-c
+      COURIER_PEERS: node-b=http://node-b:50051
+      COURIER_ROUTES: "*=node-b"
+    ports:
+      - "50053:50051"
+    volumes:
+      - node-c:/var/lib/courier
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [stack]
+    volumes:
+      - ./deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [stack]
+    depends_on: [prometheus]
+    environment:
+      # Local only: anyone who can reach port 3000 can view dashboards.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/courier.json
+    volumes:
+      - ./deploy/compose/grafana/provisioning.yml:/etc/grafana/provisioning/datasources/courier.yml:ro
+      - ./deploy/compose/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/courier.yml:ro
+      - ./deploy/compose/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+
+volumes:
+  node-a:
+  node-b:
+  node-c:
