@@ -16,7 +16,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Service containers can't pass args, and NATS needs -js for JetStream.
+      - run: docker run -d -p 4222:4222 nats:2.10 -js
+      - run: cargo test --workspace -- --include-ignored
       - run: cargo install cargo-audit --locked && cargo audit
 
   proto:

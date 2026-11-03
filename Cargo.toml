@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/bundle",
     "crates/proto",
+    "crates/links",
     "crates/relay-node",
     "crates/link-control",
     "crates/courier-cli",
@@ -17,6 +18,8 @@ license = "MIT"
 [workspace.dependencies]
 courier-bundle = { path = "crates/bundle" }
 courier-proto = { path = "crates/proto" }
+courier-links = { path = "crates/links" }
+link-control = { path = "crates/link-control" }
 
 anyhow = "1"
 thiserror = "1"
@@ -24,12 +27,15 @@ serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 ciborium = "0.2"
 tokio = { version = "1", features = ["full"] }
+async-nats = "0.51"
+futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 tonic = "0.12"
 prost = "0.13"
 tonic-build = "0.12"
 protox = "0.7"
 axum = "0.7"
+tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

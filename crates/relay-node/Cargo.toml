@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 courier-bundle.workspace = true
 courier-proto.workspace = true
+courier-links.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
@@ -15,3 +16,8 @@ tokio-stream.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+link-control.workspace = true
+axum.workspace = true
+tower.workspace = true

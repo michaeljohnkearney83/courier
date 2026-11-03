@@ -10,6 +10,7 @@ store bundles and forward them when links come back up.
 | `crates/bundle` | BPv7-lite bundle types and CBOR codec, with tests and benchmarks |
 | `crates/proto` | Generated gRPC code from `proto/` (no `protoc` needed) |
 | `crates/relay-node` | Tonic gRPC relay node |
+| `crates/links` | Link names (`node-a--node-b`) and the NATS bucket that holds link state |
 | `crates/link-control` | Axum REST service that switches links on and off |
 | `crates/courier-cli` | `courier` command-line client |
 | `proto/` | Protobuf API, linted with Buf |
@@ -78,14 +79,34 @@ Unreachable peers are retried every `--forward-interval-ms`. Bundles with no
 route stay queued until their lifetime runs out. Without `--store-dir`, the
 queue is kept in memory only.
 
+### Cutting links with link-control
+
+link-control switches links on and off and writes their state to a NATS
+JetStream key-value bucket (`courier-links`). Relay nodes started with
+`--nats-url` watch that bucket. While a link is switched off, the nodes at either end don't forward
+over it; when it comes back on they forward straight away. A node that starts
+late still picks up links switched off before it came up.
+
+```bash
+docker compose up -d   # NATS with JetStream
+cargo run -p link-control -- --nats-url nats://127.0.0.1:4222
+# start the relay nodes as above, adding --nats-url nats://127.0.0.1:4222
+curl -X PUT localhost:8080/links/node-a--node-b -H 'content-type: application/json' -d '{"up":false}'
+curl localhost:8080/links   # {"node-a--node-b":false}
+```
+
+Links are undirected: `node-b--node-a` is stored as `node-a--node-b`. A link
+with no entry is on. Without `--nats-url`, link-control keeps state in memory
+only and relay nodes treat every link as on.
+
 ## Other tasks
 
 | Task | Command |
 |---|---|
 | Benchmarks | `cargo bench -p courier-bundle` |
 | Fuzz the decoder | `cargo +nightly fuzz run decode_bundle` (from `fuzz/`'s parent) |
-| Link control | `cargo run -p link-control` then `curl -X PUT localhost:8080/links/a--b -H 'content-type: application/json' -d '{"up":false}'` |
 | NATS | `docker compose up -d` |
+| Tests that need NATS | `docker compose up -d` then `cargo test --workspace -- --include-ignored` |
 | Container image | `docker build --build-arg BIN=relay-node -t courier/relay-node:dev .` |
 | Helm | `helm install courier deploy/helm/courier` |
 | Lint proto | `buf lint` |
@@ -102,6 +123,8 @@ queue is kept in memory only.
 | `COURIER_STORE_DIR` | relay-node | none (queue kept in memory) |
 | `COURIER_FORWARD_INTERVAL_MS` | relay-node | `1000` |
 | `COURIER_LINK_LISTEN` | link-control | `0.0.0.0:8080` |
+| `COURIER_NATS_URL` | relay-node, link-control | none (link state not shared) |
+| `COURIER_TEST_NATS_URL` | NATS tests | `nats://127.0.0.1:4222` |
 | `COURIER_NODE` | courier-cli | `http://127.0.0.1:50051` |
 | `RUST_LOG` | all services | `info` |
 

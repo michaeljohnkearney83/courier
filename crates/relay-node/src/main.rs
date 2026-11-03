@@ -3,6 +3,7 @@ mod store;
 use anyhow::Context;
 use clap::Parser;
 use courier_bundle::{now_ms, Bundle, EndpointId};
+use courier_links::LinkId;
 use courier_proto::v1::relay_service_client::RelayServiceClient;
 use courier_proto::v1::relay_service_server::{RelayService, RelayServiceServer};
 use courier_proto::v1::{
@@ -54,6 +55,11 @@ struct Args {
     #[arg(long, env = "COURIER_FORWARD_INTERVAL_MS", default_value_t = 1000,
           value_parser = clap::value_parser!(u64).range(1..))]
     forward_interval_ms: u64,
+
+    /// NATS server holding link-control's link state, e.g. nats://127.0.0.1:4222.
+    /// Without it, every link counts as switched on.
+    #[arg(long, env = "COURIER_NATS_URL")]
+    nats_url: Option<String>,
 }
 
 fn parse_pair(s: &str) -> Result<(String, String), String> {
@@ -71,6 +77,8 @@ struct Router {
     routes: HashMap<String, String>,
     /// Peers that failed last time, so a link going down is logged once.
     down: std::sync::Mutex<HashSet<String>>,
+    /// Peers whose link link-control has switched off.
+    switched_off: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Router {
@@ -97,6 +105,7 @@ impl Router {
             peers,
             routes: routes.into_iter().collect(),
             down: Default::default(),
+            switched_off: Default::default(),
         })
     }
 
@@ -110,6 +119,20 @@ impl Router {
             .get(node)
             .or_else(|| self.routes.get("*"))
             .map(String::as_str)
+    }
+
+    fn is_switched_off(&self, peer: &str) -> bool {
+        self.switched_off.lock().unwrap().contains(peer)
+    }
+
+    /// Record link-control's state for the link to `peer`. Returns whether it changed.
+    fn switch(&self, peer: &str, up: bool) -> bool {
+        let mut off = self.switched_off.lock().unwrap();
+        if up {
+            off.remove(peer)
+        } else {
+            off.insert(peer.to_string())
+        }
     }
 
     async fn forward(&self, hop: &str, bundle: &Bundle) -> Forward {
@@ -150,8 +173,8 @@ struct Node {
     store: Option<Store>,
     /// Bundles waiting for a link towards their destination.
     queue: Mutex<VecDeque<Bundle>>,
-    /// Wakes the forwarder as soon as a bundle is queued.
-    queued: Notify,
+    /// Wakes the forwarder when a bundle is queued or a link is switched on.
+    wake: Notify,
     delivered_count: AtomicU64,
     forwarded_count: AtomicU64,
     expired_count: AtomicU64,
@@ -166,7 +189,7 @@ impl Node {
             router,
             store,
             queue: Mutex::new(VecDeque::new()),
-            queued: Notify::new(),
+            wake: Notify::new(),
             delivered_count: AtomicU64::new(0),
             forwarded_count: AtomicU64::new(0),
             expired_count: AtomicU64::new(0),
@@ -205,8 +228,24 @@ impl Node {
             store.save(&bundle).await?;
         }
         self.queue.lock().await.push_back(bundle);
-        self.queued.notify_one();
+        self.wake.notify_one();
         Ok(())
+    }
+
+    /// Apply a link change from link-control. Only links to a peer matter.
+    fn set_link(&self, link: &LinkId, up: bool) {
+        let Some(peer) = link.other(&self.id) else {
+            return;
+        };
+        if !self.router.peers.contains_key(peer) || !self.router.switch(peer, up) {
+            return;
+        }
+        if up {
+            info!(peer, "link switched on");
+            self.wake.notify_one();
+        } else {
+            info!(peer, "link switched off; holding bundles for it");
+        }
     }
 
     /// One pass over the queue: drop expired bundles and hand the rest to their
@@ -234,7 +273,7 @@ impl Node {
             let Some(hop) = self.router.next_hop(bundle.destination.node()) else {
                 continue;
             };
-            if unreachable.contains(hop) {
+            if unreachable.contains(hop) || self.router.is_switched_off(hop) {
                 continue;
             }
             let bundle_id = bundle.id();
@@ -353,10 +392,32 @@ async fn run_forwarder(node: Arc<Node>, interval: Duration) {
     loop {
         tokio::select! {
             _ = retry.tick() => {}
-            _ = node.queued.notified() => {}
+            _ = node.wake.notified() => {}
         }
         node.forward_queued().await;
     }
+}
+
+/// Follow link-control's link state in NATS, reconnecting if NATS goes away.
+async fn follow_links(node: Arc<Node>, nats_url: String) {
+    loop {
+        match watch_links(&node, &nats_url).await {
+            Ok(()) => warn!("link state watch ended; reconnecting"),
+            Err(e) => warn!(error = %e, "cannot follow link state in NATS; retrying"),
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn watch_links(node: &Node, nats_url: &str) -> Result<(), courier_links::NatsError> {
+    let store = courier_links::open(nats_url).await?;
+    let mut changes = courier_links::watch(&store).await?;
+    info!(nats_url, "following link state");
+    while let Some(change) = changes.next().await {
+        let (link, up) = change?;
+        node.set_link(&link, up);
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -379,6 +440,9 @@ async fn main() -> anyhow::Result<()> {
         node.clone(),
         Duration::from_millis(args.forward_interval_ms),
     ));
+    if let Some(url) = args.nats_url {
+        tokio::spawn(follow_links(node.clone(), url));
+    }
 
     info!(node_id = %args.node_id, listen = %args.listen, "relay node starting");
     Server::builder()
@@ -506,6 +570,94 @@ mod tests {
         a.forward_queued().await;
         assert!(a.queue.lock().await.is_empty());
         assert_eq!(b.delivered_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn only_links_to_peers_are_switched() {
+        let a = node("node-a", vec![pair("node-b", "http://b:1")], vec![]);
+        a.set_link(&"node-a--node-b".parse().unwrap(), false);
+        a.set_link(&"node-a--node-c".parse().unwrap(), false);
+        a.set_link(&"node-b--node-c".parse().unwrap(), false);
+        assert!(a.router.is_switched_off("node-b"));
+        assert_eq!(a.router.switched_off.lock().unwrap().len(), 1);
+
+        a.set_link(&"node-b--node-a".parse().unwrap(), true);
+        assert!(!a.router.is_switched_off("node-b"));
+    }
+
+    async fn eventually(what: &str, check: impl AsyncFn() -> bool) {
+        for _ in 0..100 {
+            if check().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    async fn switch_link(link_control: &axum::Router, x: &str, y: &str, up: bool) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::put(format!("/links/{x}--{y}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(format!(r#"{{"up":{up}}}"#)))
+            .unwrap();
+        let response = link_control.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
+
+    /// a -> b -> c with link-control and NATS in the loop.
+    #[tokio::test]
+    #[ignore = "needs NATS with JetStream: docker compose up -d"]
+    async fn three_nodes_hold_bundles_while_link_control_has_a_link_off() {
+        let nats = std::env::var("COURIER_TEST_NATS_URL")
+            .unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
+        let store = courier_links::open(&nats)
+            .await
+            .expect("NATS is not running");
+        let link_control =
+            link_control::app(link_control::Links::with_nats(store.clone()).await.unwrap());
+
+        // Fresh node ids per run keep their links apart in the shared bucket.
+        let run = now_ms();
+        let [id_a, id_b, id_c] = ["a", "b", "c"].map(|n| format!("node-{n}-{run}"));
+        let (listen_b, addr_b) = listener().await;
+        let (listen_c, addr_c) = listener().await;
+        let a = node(&id_a, vec![pair(&id_b, &addr_b)], vec![pair(&id_c, &id_b)]);
+        let b = node(&id_b, vec![pair(&id_c, &addr_c)], vec![]);
+        let c = node(&id_c, vec![], vec![]);
+        serve(listen_b, &b);
+        serve(listen_c, &c);
+        for n in [&a, &b, &c] {
+            tokio::spawn(follow_links(n.clone(), nats.clone()));
+            tokio::spawn(run_forwarder(n.clone(), Duration::from_millis(50)));
+        }
+        let mut inbox = c.delivered.subscribe();
+
+        switch_link(&link_control, &id_b, &id_c, false).await;
+        eventually("b to see b--c off", async || {
+            b.router.is_switched_off(&id_c)
+        })
+        .await;
+
+        let bundle = bundle_to(&format!("dtn://{id_c}/inbox"), Duration::from_secs(60));
+        a.accept(bundle.clone()).await.unwrap();
+        eventually("b to hold the bundle", async || {
+            b.queue.lock().await.len() == 1
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(b.forwarded_count.load(Ordering::Relaxed), 0);
+        assert_eq!(c.delivered_count.load(Ordering::Relaxed), 0);
+
+        switch_link(&link_control, &id_b, &id_c, true).await;
+        let received = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+            .await
+            .expect("bundle not delivered after the link came back")
+            .unwrap();
+        assert_eq!(received, bundle);
+        // c can deliver before b's forward call returns and b dequeues it.
+        eventually("b to dequeue", async || b.queue.lock().await.is_empty()).await;
+        store.purge(format!("{id_b}--{id_c}")).await.unwrap();
     }
 
     #[tokio::test]
