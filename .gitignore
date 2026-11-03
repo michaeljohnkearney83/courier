@@ -1,0 +1,8 @@
+/target
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/docs/book
+/dashboard/node_modules
+.terraform/
+*.tfstate*

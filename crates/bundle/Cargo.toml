@@ -1,0 +1,20 @@
+[package]
+name = "courier-bundle"
+description = "BPv7-lite bundle types and CBOR codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_bytes.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "codec"
+harness = false

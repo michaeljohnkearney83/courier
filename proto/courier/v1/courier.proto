@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package courier.v1;
+
+// The public API every relay node exposes.
+service RelayService {
+  // Accept a bundle for delivery. The node stores it and forwards it when a
+  // link towards the destination is up.
+  rpc SendBundle(SendBundleRequest) returns (SendBundleResponse);
+
+  // Stream bundles delivered to a local endpoint, e.g. dtn://node-a/inbox.
+  rpc StreamReceived(StreamReceivedRequest) returns (stream StreamReceivedResponse);
+
+  // Report queue depth and counters for this node.
+  rpc NodeStatus(NodeStatusRequest) returns (NodeStatusResponse);
+}
+
+message SendBundleRequest {
+  string source = 1;
+  string destination = 2;
+  uint64 lifetime_ms = 3;
+  bytes payload = 4;
+}
+
+message SendBundleResponse {
+  string bundle_id = 1;
+}
+
+message StreamReceivedRequest {
+  string endpoint = 1;
+}
+
+message StreamReceivedResponse {
+  string bundle_id = 1;
+  string source = 2;
+  bytes payload = 3;
+  uint64 created_at_ms = 4;
+}
+
+message NodeStatusRequest {}
+
+message NodeStatusResponse {
+  string node_id = 1;
+  uint64 queued_bundles = 2;
+  uint64 delivered_bundles = 3;
+}

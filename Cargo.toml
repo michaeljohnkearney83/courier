@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bundle",
+    "crates/proto",
+    "crates/relay-node",
+    "crates/link-control",
+    "crates/courier-cli",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+courier-bundle = { path = "crates/bundle" }
+courier-proto = { path = "crates/proto" }
+
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+ciborium = "0.2"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = "0.12"
+prost = "0.13"
+tonic-build = "0.12"
+protox = "0.7"
+axum = "0.7"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proptest = "1"
+criterion = "0.5"

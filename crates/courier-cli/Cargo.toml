@@ -1,0 +1,17 @@
+[package]
+name = "courier-cli"
+description = "Command-line client for Courier relay nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "courier"
+path = "src/main.rs"
+
+[dependencies]
+courier-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tonic.workspace = true

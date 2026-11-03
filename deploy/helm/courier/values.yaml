@@ -1,0 +1,5 @@
+relayNode:
+  replicas: 3
+  image: courier/relay-node:dev
+  grpcPort: 50051
+  storage: 1Gi

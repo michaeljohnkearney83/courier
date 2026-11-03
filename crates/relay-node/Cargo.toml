@@ -1,0 +1,17 @@
+[package]
+name = "relay-node"
+description = "Store-and-forward DTN relay node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+courier-bundle.workspace = true
+courier-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

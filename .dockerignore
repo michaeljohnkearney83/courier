@@ -1,0 +1,5 @@
+target
+fuzz/target
+docs/book
+dashboard/node_modules
+.git

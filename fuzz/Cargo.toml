@@ -1,0 +1,23 @@
+[package]
+name = "courier-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+courier-bundle = { path = "../crates/bundle" }
+
+# Kept out of the main workspace because cargo-fuzz needs nightly.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode_bundle"
+path = "fuzz_targets/decode_bundle.rs"
+test = false
+doc = false
+bench = false

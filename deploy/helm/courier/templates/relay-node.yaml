@@ -1,0 +1,53 @@
+# Each relay node is a StatefulSet pod (relay-node-0, relay-node-1, ...)
+# with its own volume for stored bundles. The pod name is the node id.
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-node
+spec:
+  clusterIP: None
+  selector:
+    app: relay-node
+  ports:
+    - name: grpc
+      port: {{ .Values.relayNode.grpcPort }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: relay-node
+spec:
+  serviceName: relay-node
+  replicas: {{ .Values.relayNode.replicas }}
+  selector:
+    matchLabels:
+      app: relay-node
+  template:
+    metadata:
+      labels:
+        app: relay-node
+    spec:
+      containers:
+        - name: relay-node
+          image: {{ .Values.relayNode.image }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.relayNode.grpcPort }}
+          env:
+            - name: COURIER_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: COURIER_LISTEN
+              value: "0.0.0.0:{{ .Values.relayNode.grpcPort }}"
+          volumeMounts:
+            - name: bundles
+              mountPath: /var/lib/courier
+  volumeClaimTemplates:
+    - metadata:
+        name: bundles
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ .Values.relayNode.storage }}
